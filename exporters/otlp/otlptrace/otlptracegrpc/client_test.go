@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -666,7 +668,7 @@ func canonical(t *testing.T, endpoint string) string {
 func BenchmarkExporterExportSpans(b *testing.B) {
 	const n = 10
 
-	run := func(b *testing.B) {
+	run := func(b *testing.B, spans []sdktrace.ReadOnlySpan) {
 		mc := runMockCollectorWithConfig(b, &mockConfig{
 			endpoint: "localhost:0",
 			partial: &coltracepb.ExportTracePartialSuccess{
@@ -682,12 +684,6 @@ func BenchmarkExporterExportSpans(b *testing.B) {
 			assert.NoError(b, exp.Shutdown(context.Background()))
 		})
 
-		stubs := make([]tracetest.SpanStub, n)
-		for i := range stubs {
-			stubs[i].Name = fmt.Sprintf("Span %d", i)
-		}
-		spans := tracetest.SpanStubs(stubs).Snapshots()
-
 		b.ReportAllocs()
 		b.ResetTimer()
 
@@ -698,13 +694,83 @@ func BenchmarkExporterExportSpans(b *testing.B) {
 		_ = err
 	}
 
-	b.Run("Observability", func(b *testing.B) {
-		b.Setenv("OTEL_GO_X_OBSERVABILITY", "true")
-		run(b)
+	stubs := make([]tracetest.SpanStub, n)
+	for i := range stubs {
+		stubs[i].Name = fmt.Sprintf("Span %d", i)
+	}
+	batches := []struct {
+		name  string
+		spans []sdktrace.ReadOnlySpan
+	}{
+		{"NoAttributes", tracetest.SpanStubs(stubs).Snapshots()},
+		{"Sparse", otlptracetest.SparseSpans(n)},
+		{"Dense", otlptracetest.DenseSpans(n)},
+	}
+
+	for _, obs := range []struct {
+		name  string
+		value string
+	}{
+		{"Observability", "true"},
+		{"NoObservability", "false"},
+	} {
+		b.Run(obs.name, func(b *testing.B) {
+			b.Setenv("OTEL_GO_X_OBSERVABILITY", obs.value)
+			for _, batch := range batches {
+				b.Run(batch.name, func(b *testing.B) {
+					run(b, batch.spans)
+				})
+			}
+		})
+	}
+}
+
+// TestExportSpansRetainingInterceptor checks that a request retained by a
+// client interceptor is not changed by later exports.
+func TestExportSpansRetainingInterceptor(t *testing.T) {
+	mc := runMockCollector(t)
+	t.Cleanup(func() { require.NoError(t, mc.stop()) })
+
+	var (
+		mu       sync.Mutex
+		retained []*coltracepb.ExportTraceServiceRequest
+	)
+	retain := func(
+		ctx context.Context,
+		method string,
+		req, reply any,
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
+		if r, ok := req.(*coltracepb.ExportTraceServiceRequest); ok {
+			mu.Lock()
+			retained = append(retained, r)
+			mu.Unlock()
+		}
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+
+	ctx := t.Context()
+	exp := newGRPCExporter(ctx, t, mc.endpoint,
+		otlptracegrpc.WithDialOption(grpc.WithUnaryInterceptor(retain)),
+	)
+	t.Cleanup(func() {
+		//nolint:usetesting // required to avoid getting a canceled context at cleanup.
+		assert.NoError(t, exp.Shutdown(context.Background()))
 	})
 
-	b.Run("NoObservability", func(b *testing.B) {
-		b.Setenv("OTEL_GO_X_OBSERVABILITY", "false")
-		run(b)
-	})
+	require.NoError(t, exp.ExportSpans(ctx, otlptracetest.DenseSpans(3)))
+	mu.Lock()
+	require.Len(t, retained, 1)
+	want := proto.Clone(retained[0])
+	mu.Unlock()
+
+	require.NoError(t, exp.ExportSpans(ctx, otlptracetest.DenseSpans(3)))
+	require.NoError(t, exp.ExportSpans(ctx, otlptracetest.SparseSpans(3)))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, retained, 3)
+	assert.True(t, proto.Equal(want, retained[0]), "retained request changed by later exports")
 }

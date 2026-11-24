@@ -37,6 +37,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata/metricdatatest"
+	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.45.0"
 	"go.opentelemetry.io/otel/semconv/v1.45.0/otelconv"
@@ -1267,7 +1268,7 @@ func TestGetBodyCalledOnRedirectWithGzip(t *testing.T) {
 func BenchmarkExporterExportSpans(b *testing.B) {
 	const n = 10
 
-	run := func(b *testing.B) {
+	run := func(b *testing.B, spans []tracesdk.ReadOnlySpan) {
 		mc := runMockCollector(b, mockCollectorConfig{
 			Partial: &coltracepb.ExportTracePartialSuccess{
 				RejectedSpans: 5,
@@ -1287,12 +1288,6 @@ func BenchmarkExporterExportSpans(b *testing.B) {
 			assert.NoError(b, exp.Shutdown(context.Background()))
 		})
 
-		stubs := make([]tracetest.SpanStub, n)
-		for i := range stubs {
-			stubs[i].Name = fmt.Sprintf("Span %d", i)
-		}
-		spans := tracetest.SpanStubs(stubs).Snapshots()
-
 		b.ReportAllocs()
 		b.ResetTimer()
 
@@ -1302,15 +1297,35 @@ func BenchmarkExporterExportSpans(b *testing.B) {
 		_ = err
 	}
 
-	b.Run("Observability", func(b *testing.B) {
-		b.Setenv("OTEL_GO_X_OBSERVABILITY", "true")
-		run(b)
-	})
+	stubs := make([]tracetest.SpanStub, n)
+	for i := range stubs {
+		stubs[i].Name = fmt.Sprintf("Span %d", i)
+	}
+	batches := []struct {
+		name  string
+		spans []tracesdk.ReadOnlySpan
+	}{
+		{"NoAttributes", tracetest.SpanStubs(stubs).Snapshots()},
+		{"Sparse", otlptracetest.SparseSpans(n)},
+		{"Dense", otlptracetest.DenseSpans(n)},
+	}
 
-	b.Run("NoObservability", func(b *testing.B) {
-		b.Setenv("OTEL_GO_X_OBSERVABILITY", "false")
-		run(b)
-	})
+	for _, obs := range []struct {
+		name  string
+		value string
+	}{
+		{"Observability", "true"},
+		{"NoObservability", "false"},
+	} {
+		b.Run(obs.name, func(b *testing.B) {
+			b.Setenv("OTEL_GO_X_OBSERVABILITY", obs.value)
+			for _, batch := range batches {
+				b.Run(batch.name, func(b *testing.B) {
+					run(b, batch.spans)
+				})
+			}
+		})
+	}
 }
 
 func TestClientInstrumentationStaleStatusCode(t *testing.T) {
