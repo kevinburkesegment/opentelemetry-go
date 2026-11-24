@@ -71,7 +71,7 @@ See our [versioning policy](VERSIONING.md) for more information about these stab
 
 ### Changed
 
-- Reduce allocations in `go.opentelemetry.io/otel/exporters/otlp/otlptrace` by allocating protobuf backing storage per attribute list sized from actual contents, with independent ID copies. Each export owns its storage with no reuse, safe for retaining clients. (#8892)
+- Reduce allocations when exporting spans with attributes in `go.opentelemetry.io/otel/exporters/otlp/otlptrace`. (#XXXX)
 
 ### Fixed
 

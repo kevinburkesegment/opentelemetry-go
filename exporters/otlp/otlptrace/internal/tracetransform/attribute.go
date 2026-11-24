@@ -13,10 +13,19 @@ import (
 )
 
 // KeyValues transforms a slice of attribute KeyValues into OTLP key-values.
-// Backing storage is allocated per list from actual contents, each export
-// owns its storage with no reuse, so retaining clients stay safe.
 func KeyValues(attrs []attribute.KeyValue) []*commonpb.KeyValue {
-	return sizedKeyValues(attrs)
+	if len(attrs) == 0 {
+		return nil
+	}
+	if len(attrs) > maxUnsizedLen {
+		return sizedKeyValues(attrs)
+	}
+
+	out := make([]*commonpb.KeyValue, 0, len(attrs))
+	for _, kv := range attrs {
+		out = append(out, KeyValue(kv))
+	}
+	return out
 }
 
 // Iterator transforms an attribute iterator into OTLP key-values.
@@ -25,11 +34,19 @@ func Iterator(iter attribute.Iterator) []*commonpb.KeyValue {
 	if l == 0 {
 		return nil
 	}
-	attrs := make([]attribute.KeyValue, 0, l)
-	for iter.Next() {
-		attrs = append(attrs, iter.Attribute())
+	if l > maxUnsizedLen {
+		attrs := make([]attribute.KeyValue, 0, l)
+		for iter.Next() {
+			attrs = append(attrs, iter.Attribute())
+		}
+		return sizedKeyValues(attrs)
 	}
-	return sizedKeyValues(attrs)
+
+	out := make([]*commonpb.KeyValue, 0, l)
+	for iter.Next() {
+		out = append(out, KeyValue(iter.Attribute()))
+	}
+	return out
 }
 
 // ResourceAttributes transforms a Resource OTLP key-values.

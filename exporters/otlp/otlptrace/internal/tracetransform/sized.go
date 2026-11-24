@@ -9,6 +9,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
+// maxUnsizedLen is the longest attribute list converted one attribute at a
+// time. For shorter lists, counting the values and allocating an array per
+// value type costs more than the separate allocations it saves.
+const maxUnsizedLen = 2
+
 // attrCounts holds exact backing sizes for one attribute list, including
 // nested SLICE/MAP contents. Sizing from actual contents avoids the sparse
 // byte regressions of fixed per-span heuristics.
@@ -55,19 +60,41 @@ type listStorage struct {
 	bytesIdx  int
 }
 
-func newListStorage(c attrCounts) *listStorage {
-	return &listStorage{
-		kvs:    make([]commonpb.KeyValue, c.kvs),
-		avs:    make([]commonpb.AnyValue, c.avs),
-		arrs:   make([]commonpb.ArrayValue, c.arrs),
-		arrW:   make([]commonpb.AnyValue_ArrayValue, c.arrW),
-		kvls:   make([]commonpb.KeyValueList, c.kvls),
-		kvW:    make([]commonpb.AnyValue_KvlistValue, c.kvW),
-		strs:   make([]commonpb.AnyValue_StringValue, c.strs),
-		bools:  make([]commonpb.AnyValue_BoolValue, c.bools),
-		ints:   make([]commonpb.AnyValue_IntValue, c.ints),
-		floats: make([]commonpb.AnyValue_DoubleValue, c.floats),
-		bytes:  make([]commonpb.AnyValue_BytesValue, c.bytes),
+// init allocates the backing arrays for c. Arrays for value types the list
+// does not contain are left nil, avoiding a runtime call for each.
+func (s *listStorage) init(c attrCounts) {
+	if c.kvs > 0 {
+		s.kvs = make([]commonpb.KeyValue, c.kvs)
+	}
+	if c.avs > 0 {
+		s.avs = make([]commonpb.AnyValue, c.avs)
+	}
+	if c.arrs > 0 {
+		s.arrs = make([]commonpb.ArrayValue, c.arrs)
+	}
+	if c.arrW > 0 {
+		s.arrW = make([]commonpb.AnyValue_ArrayValue, c.arrW)
+	}
+	if c.kvls > 0 {
+		s.kvls = make([]commonpb.KeyValueList, c.kvls)
+	}
+	if c.kvW > 0 {
+		s.kvW = make([]commonpb.AnyValue_KvlistValue, c.kvW)
+	}
+	if c.strs > 0 {
+		s.strs = make([]commonpb.AnyValue_StringValue, c.strs)
+	}
+	if c.bools > 0 {
+		s.bools = make([]commonpb.AnyValue_BoolValue, c.bools)
+	}
+	if c.ints > 0 {
+		s.ints = make([]commonpb.AnyValue_IntValue, c.ints)
+	}
+	if c.floats > 0 {
+		s.floats = make([]commonpb.AnyValue_DoubleValue, c.floats)
+	}
+	if c.bytes > 0 {
+		s.bytes = make([]commonpb.AnyValue_BytesValue, c.bytes)
 	}
 }
 
@@ -153,7 +180,8 @@ func sizedKeyValues(attrs []attribute.KeyValue) []*commonpb.KeyValue {
 	if len(attrs) == 0 {
 		return nil
 	}
-	s := newListStorage(countAttrs(attrs))
+	var s listStorage
+	s.init(countAttrs(attrs))
 	out := make([]*commonpb.KeyValue, 0, len(attrs))
 	for _, kv := range attrs {
 		pbKV := s.allocKV()
